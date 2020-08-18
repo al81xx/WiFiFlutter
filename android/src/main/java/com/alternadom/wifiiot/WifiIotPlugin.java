@@ -10,6 +10,7 @@ import android.content.pm.PackageManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.net.ConnectivityManager;
+import android.net.ConnectivityManager.NetworkCallback;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
@@ -18,7 +19,11 @@ import android.net.wifi.ScanResult;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
+import android.net.wifi.WifiNetworkSpecifier;
 import android.os.Build;
+
+import androidx.annotation.NonNull;
+import androidx.core.util.Consumer;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -56,6 +61,7 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
     private Activity moActivity;
     private BroadcastReceiver receiver;
     private List<String> ssidsToBeRemovedOnExit = new ArrayList<String>();
+    private Runnable disconnectAndroidQAndAbove;
 
     private WifiIotPlugin(Activity poActivity) {
         this.moActivity = poActivity;
@@ -82,7 +88,8 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
         registrar.addViewDestroyListener(new ViewDestroyListener() {
             @Override
             public boolean onViewDestroy(FlutterNativeView view) {
-                if (!wifiIotPlugin.ssidsToBeRemovedOnExit.isEmpty()) {
+                if (!wifiIotPlugin.ssidsToBeRemovedOnExit.isEmpty() &&
+                        Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                     List<WifiConfiguration> wifiConfigList =
                             wifiIotPlugin.moWiFi.getConfiguredNetworks();
                     for (String ssid : wifiIotPlugin.ssidsToBeRemovedOnExit) {
@@ -527,8 +534,10 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
 
     /// Method to connect/disconnect wifi service
     private void setEnabled(MethodCall poCall, Result poResult) {
-        Boolean enabled = poCall.argument("state");
-        moWiFi.setWifiEnabled(enabled);
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            Boolean enabled = poCall.argument("state");
+            moWiFi.setWifiEnabled(enabled);
+        }
         poResult.success(null);
     }
 
@@ -540,13 +549,16 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
                 String security = poCall.argument("security");
                 Boolean joinOnce = poCall.argument("join_once");
 
-                final boolean connected = connectTo(ssid, password, security, joinOnce);
-                
-				final Handler handler = new Handler(Looper.getMainLooper());
-                handler.post(new Runnable() {
+                connectTo(ssid, password, security, joinOnce, new Consumer<Boolean>() {
                     @Override
-                    public void run () {
-                        poResult.success(connected);
+                    public void accept(final Boolean connected) {
+                        final Handler handler = new Handler(Looper.getMainLooper());
+                        handler.post(new Runnable() {
+                            @Override
+                            public void run () {
+                                poResult.success(connected);
+                            }
+                        });
                     }
                 });
             }
@@ -577,13 +589,16 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
                     }
                 }
 
-                final boolean connected = connectTo(ssid, password, security, joinOnce);
-
-				final Handler handler = new Handler(Looper.getMainLooper());
-                handler.post(new Runnable() {
+                connectTo(ssid, password, security, joinOnce, new Consumer<Boolean>() {
                     @Override
-                    public void run () {
-                        poResult.success(connected);
+                    public void accept(final Boolean connected) {
+                        final Handler handler = new Handler(Looper.getMainLooper());
+                        handler.post(new Runnable() {
+                            @Override
+                            public void run () {
+                                poResult.success(connected);
+                            }
+                        });
                     }
                 });
             }
@@ -617,7 +632,13 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
 
     /// Disconnect current Wifi.
     private void disconnect(Result poResult) {
-        moWiFi.disconnect();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (disconnectAndroidQAndAbove != null) {
+                disconnectAndroidQAndAbove.run();
+            }
+        } else {
+            moWiFi.disconnect();
+        }
         poResult.success(null);
     }
 
@@ -672,6 +693,10 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
 
     /// This method will remove the WiFi network as per the passed SSID from the device list
     private void removeWifiNetwork(MethodCall poCall, Result poResult) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            poResult.success(false);
+            return;
+        }
         String prefix_ssid = poCall.argument("ssid");
         if (prefix_ssid.equals("")) {
             poResult.error("Error", "No prefix SSID was given!", null);
@@ -692,7 +717,10 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
 
     /// This method will remove the WiFi network as per the passed SSID from the device list
     private void isRegisteredWifiNetwork(MethodCall poCall, Result poResult) {
-
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            poResult.success(false);
+            return;
+        }
         String ssid = poCall.argument("ssid");
 
         List<WifiConfiguration> mWifiConfigList = moWiFi.getConfiguredNetworks();
@@ -726,96 +754,145 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
     }
 
     /// Method to connect to WIFI Network
-    private Boolean connectTo(String ssid, String password, String security, Boolean joinOnce) {
-        /// Make new configuration
-        WifiConfiguration conf = new WifiConfiguration();
-        conf.SSID = "\"" + ssid + "\"";
+    private void connectTo(String ssid, String password, String security, Boolean joinOnce, final Consumer<Boolean> consumer) {
 
-        if (security != null) security = security.toUpperCase();
-        else security = "NONE";
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            final WifiNetworkSpecifier specifier = new WifiNetworkSpecifier.Builder()
+                    .setSsid(ssid)
+                    .setWpa2Passphrase(password)
+                    .build();
 
-        if (security.toUpperCase().equals("WPA")) {
+            final NetworkRequest request = new NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .setNetworkSpecifier(specifier)
+                    .build();
 
-            /// appropriate ciper is need to set according to security type used,
-            /// ifcase of not added it will not be able to connect
-            conf.preSharedKey = "\"" + password + "\"";
+            final ConnectivityManager connectivityManager =
+                    (ConnectivityManager) moContext.getSystemService(Context.CONNECTIVITY_SERVICE);
 
-            conf.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
+            if (connectivityManager != null) {
+                final Intent intent = new Intent();
 
-            conf.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
+                final NetworkCallback networkCallback = new NetworkCallback() {
+                    @Override
+                    public void onAvailable(@NonNull final Network network) {
+                        connectivityManager.bindProcessToNetwork(network);
+                        consumer.accept(true);
 
-            conf.status = WifiConfiguration.Status.ENABLED;
+                        final NetworkCallback self = this;
+                        disconnectAndroidQAndAbove = new Runnable() {
+                            @Override
+                            public void run() {
+                                connectivityManager.unregisterNetworkCallback(self);
+                            }
+                        };
+                    }
 
-            conf.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.TKIP);
-            conf.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.CCMP);
-
-            conf.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
-
-            conf.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.TKIP);
-            conf.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.CCMP);
-
-            conf.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
-            conf.allowedProtocols.set(WifiConfiguration.Protocol.WPA);
-        } else if (security.equals("WEP")) {
-            conf.wepKeys[0] = "\"" + password + "\"";
-            conf.wepTxKeyIndex = 0;
-            conf.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
-            conf.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.WEP40);
+                    @Override
+                    public void onUnavailable() {
+                        consumer.accept(false);
+                    }
+                };
+                connectivityManager.requestNetwork(request, networkCallback);
+            }
         } else {
-            conf.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
-        }
 
-        /// Remove the existing configuration for this netwrok
-        List<WifiConfiguration> mWifiConfigList = moWiFi.getConfiguredNetworks();
+            /// Make new configuration
+            WifiConfiguration conf = new WifiConfiguration();
+            conf.SSID = "\"" + ssid + "\"";
 
-        int updateNetwork = -1;
+            if (security != null) {
+                security = security.toUpperCase();
+            } else {
+                security = "NONE";
+            }
 
-        if (mWifiConfigList != null) {
-            for (WifiConfiguration wifiConfig : mWifiConfigList) {
-                if (wifiConfig.SSID.equals(conf.SSID)) {
-                    conf.networkId = wifiConfig.networkId;
-                    updateNetwork = moWiFi.updateNetwork(conf);
+            if (security.toUpperCase().equals("WPA")) {
+
+                /// appropriate ciper is need to set according to security type used,
+                /// ifcase of not added it will not be able to connect
+                conf.preSharedKey = "\"" + password + "\"";
+
+                conf.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
+
+                conf.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
+
+                conf.status = WifiConfiguration.Status.ENABLED;
+
+                conf.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.TKIP);
+                conf.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.CCMP);
+
+                conf.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
+
+                conf.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.TKIP);
+                conf.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.CCMP);
+
+                conf.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
+                conf.allowedProtocols.set(WifiConfiguration.Protocol.WPA);
+            } else if (security.equals("WEP")) {
+                conf.wepKeys[0] = "\"" + password + "\"";
+                conf.wepTxKeyIndex = 0;
+                conf.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
+                conf.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.WEP40);
+            } else {
+                conf.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
+            }
+
+            /// Remove the existing configuration for this netwrok
+            List<WifiConfiguration> mWifiConfigList = moWiFi.getConfiguredNetworks();
+
+            int updateNetwork = -1;
+
+            if (mWifiConfigList != null) {
+                for (WifiConfiguration wifiConfig : mWifiConfigList) {
+                    if (wifiConfig.SSID.equals(conf.SSID)) {
+                        conf.networkId = wifiConfig.networkId;
+                        updateNetwork = moWiFi.updateNetwork(conf);
+                    }
+                }
+            }
+
+            /// If network not already in configured networks add new network
+            if (updateNetwork == -1) {
+                updateNetwork = moWiFi.addNetwork(conf);
+                moWiFi.saveConfiguration();
+            }
+
+            if (updateNetwork == -1) {
+                consumer.accept(false);
+                return;
+            }
+
+            if (joinOnce != null && joinOnce.booleanValue()) {
+                ssidsToBeRemovedOnExit.add(conf.SSID);
+            }
+
+            boolean disconnect = moWiFi.disconnect();
+            if (!disconnect) {
+                consumer.accept(false);
+                return;
+            }
+
+            boolean enabled = moWiFi.enableNetwork(updateNetwork, true);
+            if (!enabled) {
+                consumer.accept(false);
+                return;
+            }
+
+            for (int i = 0; i < 30; i++) {
+                int networkId = moWiFi.getConnectionInfo().getNetworkId();
+                if (networkId != -1) {
+                    consumer.accept(networkId == updateNetwork);
+                    return;
+                }
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ignored) {
+                    break;
                 }
             }
         }
-
-        /// If network not already in configured networks add new network
-        if (updateNetwork == -1) {
-            updateNetwork = moWiFi.addNetwork(conf);
-            moWiFi.saveConfiguration();
-        }
-
-        if (updateNetwork == -1) {
-            return false;
-        }
-
-        if (joinOnce != null && joinOnce.booleanValue()) {
-            ssidsToBeRemovedOnExit.add(conf.SSID);
-        }
-
-        boolean disconnect = moWiFi.disconnect();
-        if (!disconnect) {
-            return false;
-        }
-
-        boolean enabled = moWiFi.enableNetwork(updateNetwork, true);
-        if (!enabled) return false;
-
-        boolean connected = false;
-        for (int i = 0; i < 30; i++) {
-            int networkId = moWiFi.getConnectionInfo().getNetworkId();
-            if (networkId != -1) {
-                connected = networkId == updateNetwork;
-                break;
-            }
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException ignored) {
-                break;
-            }
-        }
-
-        return connected;
     }
 
     public static String sudoForResult(String... strings) {
