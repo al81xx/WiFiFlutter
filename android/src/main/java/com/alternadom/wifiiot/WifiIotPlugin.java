@@ -51,6 +51,26 @@ import io.flutter.plugin.common.PluginRegistry.Registrar;
 import io.flutter.plugin.common.PluginRegistry.ViewDestroyListener;
 import io.flutter.view.FlutterNativeView;
 
+class MyConsumer<T> implements Consumer<T> {
+
+    @Override
+    public void accept(T t) {}
+
+    static MyConsumer<Boolean> getFresh(final Handler uiThreadHandler, final Result poResult) {
+        return new MyConsumer<Boolean>() {
+            @Override
+            public void accept(final Boolean connected) {
+                uiThreadHandler.post(new Runnable() {
+                    @Override
+                    public void run () {
+                        poResult.success(connected);
+                    }
+                });
+            }
+        };
+    }
+}
+
 /**
  * WifiIotPlugin
  */
@@ -62,12 +82,14 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
     private BroadcastReceiver receiver;
     private List<String> ssidsToBeRemovedOnExit = new ArrayList<String>();
     private Runnable disconnectAndroidQAndAbove;
+    private Handler uiThreadHandler;
 
     private WifiIotPlugin(Activity poActivity) {
         this.moActivity = poActivity;
         this.moContext = poActivity.getApplicationContext();
         this.moWiFi = (WifiManager) moContext.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         this.moWiFiAPManager = new WifiApManager(moContext.getApplicationContext());
+        this.uiThreadHandler = new Handler(Looper.getMainLooper());
     }
 
     /**
@@ -542,27 +564,12 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
     }
 
     private void connect(final MethodCall poCall, final Result poResult) {
-        new Thread() {
-            public void run() {
-                String ssid = poCall.argument("ssid");
-                String password = poCall.argument("password");
-                String security = poCall.argument("security");
-                Boolean joinOnce = poCall.argument("join_once");
+        String ssid = poCall.argument("ssid");
+        String password = poCall.argument("password");
+        String security = poCall.argument("security");
+        Boolean joinOnce = poCall.argument("join_once");
 
-                connectTo(ssid, password, security, joinOnce, new Consumer<Boolean>() {
-                    @Override
-                    public void accept(final Boolean connected) {
-                        final Handler handler = new Handler(Looper.getMainLooper());
-                        handler.post(new Runnable() {
-                            @Override
-                            public void run () {
-                                poResult.success(connected);
-                            }
-                        });
-                    }
-                });
-            }
-        }.start();
+        connectTo(ssid, password, security, joinOnce, poResult);
     }
 
     /// Send the ssid and password of a Wifi network into this to connect to the network.
@@ -574,35 +581,21 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
         if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && moContext.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED){
             moActivity.requestPermissions(new String[]{Manifest.permission.ACCESS_COARSE_LOCATION}, PERMISSIONS_REQUEST_CODE_ACCESS_COARSE_LOCATION);
         }
-        new Thread() {
-            public void run() {
-                String ssid = poCall.argument("ssid");
-                String password = poCall.argument("password");
-                Boolean joinOnce = poCall.argument("join_once");
 
-                String security = null;
-                List<ScanResult> results = moWiFi.getScanResults();
-                for (ScanResult result : results) {
-                    String resultString = "" + result.SSID;
-                    if (ssid.equals(resultString)) {
-                        security = getSecurityType(result);
-                    }
-                }
+        String ssid = poCall.argument("ssid");
+        String password = poCall.argument("password");
+        Boolean joinOnce = poCall.argument("join_once");
 
-                connectTo(ssid, password, security, joinOnce, new Consumer<Boolean>() {
-                    @Override
-                    public void accept(final Boolean connected) {
-                        final Handler handler = new Handler(Looper.getMainLooper());
-                        handler.post(new Runnable() {
-                            @Override
-                            public void run () {
-                                poResult.success(connected);
-                            }
-                        });
-                    }
-                });
+        String security = null;
+        List<ScanResult> results = moWiFi.getScanResults();
+        for (ScanResult result : results) {
+            String resultString = "" + result.SSID;
+            if (ssid.equals(resultString)) {
+                security = getSecurityType(result);
             }
-        }.start();
+        }
+
+        connectTo(ssid, password, security, joinOnce, poResult);
     }
 
     private static String getSecurityType(ScanResult scanResult) {
@@ -754,7 +747,7 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
     }
 
     /// Method to connect to WIFI Network
-    private void connectTo(String ssid, String password, String security, Boolean joinOnce, final Consumer<Boolean> consumer) {
+    private void connectTo(String ssid, String password, String security, Boolean joinOnce, final Result poResult) {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             final WifiNetworkSpecifier specifier = new WifiNetworkSpecifier.Builder()
@@ -764,6 +757,8 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
 
             final NetworkRequest request = new NetworkRequest.Builder()
                     .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_TRUSTED)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
                     .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                     .setNetworkSpecifier(specifier)
                     .build();
@@ -772,13 +767,12 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
                     (ConnectivityManager) moContext.getSystemService(Context.CONNECTIVITY_SERVICE);
 
             if (connectivityManager != null) {
-                final Intent intent = new Intent();
 
                 final NetworkCallback networkCallback = new NetworkCallback() {
                     @Override
                     public void onAvailable(@NonNull final Network network) {
+                        MyConsumer.getFresh(uiThreadHandler, poResult).accept(true);
                         connectivityManager.bindProcessToNetwork(network);
-                        consumer.accept(true);
 
                         final NetworkCallback self = this;
                         disconnectAndroidQAndAbove = new Runnable() {
@@ -791,12 +785,13 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
 
                     @Override
                     public void onUnavailable() {
-                        consumer.accept(false);
+                        MyConsumer.getFresh(uiThreadHandler, poResult).accept(false);
                     }
                 };
                 connectivityManager.requestNetwork(request, networkCallback);
             }
         } else {
+            MyConsumer<Boolean> consumer = MyConsumer.getFresh(uiThreadHandler, poResult);
 
             /// Make new configuration
             WifiConfiguration conf = new WifiConfiguration();
@@ -959,4 +954,5 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
         }
     }
 }
+
 
