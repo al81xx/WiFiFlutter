@@ -778,6 +778,7 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
                         disconnectAndroidQAndAbove = new Runnable() {
                             @Override
                             public void run() {
+                                connectivityManager.bindProcessToNetwork(null);
                                 connectivityManager.unregisterNetworkCallback(self);
                             }
                         };
