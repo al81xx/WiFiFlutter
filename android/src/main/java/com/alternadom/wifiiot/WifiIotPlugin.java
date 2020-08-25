@@ -564,12 +564,16 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
     }
 
     private void connect(final MethodCall poCall, final Result poResult) {
-        String ssid = poCall.argument("ssid");
-        String password = poCall.argument("password");
-        String security = poCall.argument("security");
-        Boolean joinOnce = poCall.argument("join_once");
+        new Thread() {
+            public void run() {
+                String ssid = poCall.argument("ssid");
+                String password = poCall.argument("password");
+                String security = poCall.argument("security");
+                Boolean joinOnce = poCall.argument("join_once");
 
-        connectTo(ssid, password, security, joinOnce, poResult);
+                connectTo(ssid, password, security, joinOnce, poResult);
+            }
+        }.start();
     }
 
     /// Send the ssid and password of a Wifi network into this to connect to the network.
@@ -581,21 +585,24 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
         if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && moContext.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED){
             moActivity.requestPermissions(new String[]{Manifest.permission.ACCESS_COARSE_LOCATION}, PERMISSIONS_REQUEST_CODE_ACCESS_COARSE_LOCATION);
         }
+        new Thread() {
+            public void run() {
+                String ssid = poCall.argument("ssid");
+                String password = poCall.argument("password");
+                Boolean joinOnce = poCall.argument("join_once");
 
-        String ssid = poCall.argument("ssid");
-        String password = poCall.argument("password");
-        Boolean joinOnce = poCall.argument("join_once");
+                String security = null;
+                List<ScanResult> results = moWiFi.getScanResults();
+                for (ScanResult result : results) {
+                    String resultString = "" + result.SSID;
+                    if (ssid.equals(resultString)) {
+                        security = getSecurityType(result);
+                    }
+                }
 
-        String security = null;
-        List<ScanResult> results = moWiFi.getScanResults();
-        for (ScanResult result : results) {
-            String resultString = "" + result.SSID;
-            if (ssid.equals(resultString)) {
-                security = getSecurityType(result);
+                connectTo(ssid, password, security, joinOnce, poResult);
             }
-        }
-
-        connectTo(ssid, password, security, joinOnce, poResult);
+        }.start();
     }
 
     private static String getSecurityType(ScanResult scanResult) {
