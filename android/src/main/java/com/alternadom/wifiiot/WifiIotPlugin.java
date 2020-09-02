@@ -86,7 +86,7 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
     private BroadcastReceiver receiver;
     private List<String> ssidsToBeRemovedOnExit = new ArrayList<String>();
     private Runnable disconnectAndroidQAndAbove;
-    private Runnable disconnectAndroidPAndBelow;
+    private Runnable unregisterForceWiFiUsageCallback;
     private Handler uiThreadHandler;
 
     private WifiIotPlugin(Activity poActivity) {
@@ -513,24 +513,33 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
                 NetworkRequest.Builder builder;
                 builder = new NetworkRequest.Builder();
                 /// set the transport type do WIFI
+                builder.removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
                 builder.addTransportType(NetworkCapabilities.TRANSPORT_WIFI);
                 manager.requestNetwork(builder.build(), new ConnectivityManager.NetworkCallback() {
                     @Override
                     public void onAvailable(@NonNull Network network) {
                         super.onAvailable(network);
                         final NetworkCallback self = this;
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            manager.bindProcessToNetwork(network);
 
-                            disconnectAndroidPAndBelow = new Runnable() {
-                                @Override
-                                public void run() {
-                                    manager.bindProcessToNetwork(null);
-                                    manager.unregisterNetworkCallback(self);
-                                }
-                            };
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            NetworkInfo networkInfo = manager.getActiveNetworkInfo();
+                            if (networkInfo == null) {
+                                return;
+                            }
+                            if (networkInfo.getType() != ConnectivityManager.TYPE_WIFI) {
+                                manager.bindProcessToNetwork(network);
+
+                                unregisterForceWiFiUsageCallback = new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        manager.bindProcessToNetwork(null);
+                                        manager.unregisterNetworkCallback(self);
+                                    }
+                                };
+                            }
                         }
                     }
+
                 });
             }
         }
@@ -625,7 +634,9 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
             }
         } else {
             moWiFi.disconnect();
-            disconnectAndroidPAndBelow.run();
+        }
+        if (unregisterForceWiFiUsageCallback != null) {
+            unregisterForceWiFiUsageCallback.run();
         }
         poResult.success(null);
     }
@@ -950,5 +961,4 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
         }
     }
 }
-
 
