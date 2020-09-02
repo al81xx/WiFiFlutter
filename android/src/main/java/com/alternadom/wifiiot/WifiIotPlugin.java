@@ -63,7 +63,11 @@ class MyConsumer<T> implements Consumer<T> {
                 uiThreadHandler.post(new Runnable() {
                     @Override
                     public void run () {
-                        poResult.success(connected);
+                        try {
+                            poResult.success(connected);
+                        } catch (Exception ignored) {
+
+                        }
                     }
                 });
             }
@@ -82,6 +86,7 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
     private BroadcastReceiver receiver;
     private List<String> ssidsToBeRemovedOnExit = new ArrayList<String>();
     private Runnable disconnectAndroidQAndAbove;
+    private Runnable disconnectAndroidPAndBelow;
     private Handler uiThreadHandler;
 
     private WifiIotPlugin(Activity poActivity) {
@@ -503,49 +508,31 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
         final ConnectivityManager manager = (ConnectivityManager) moContext
                 .getSystemService(Context.CONNECTIVITY_SERVICE);
 
-        boolean success = true;
-        boolean shouldReply = true;
         if (Build.VERSION.SDK_INT > Build.VERSION_CODES.LOLLIPOP && manager != null) {
             if (useWifi) {
                 NetworkRequest.Builder builder;
                 builder = new NetworkRequest.Builder();
                 /// set the transport type do WIFI
                 builder.addTransportType(NetworkCapabilities.TRANSPORT_WIFI);
-                shouldReply = false;
                 manager.requestNetwork(builder.build(), new ConnectivityManager.NetworkCallback() {
                     @Override
-                    public void onAvailable(Network network) {
+                    public void onAvailable(@NonNull Network network) {
                         super.onAvailable(network);
-                        boolean success = false;
+                        final NetworkCallback self = this;
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            success = manager.bindProcessToNetwork(network);
+                            manager.bindProcessToNetwork(network);
 
-                        } else {
-                            success = ConnectivityManager.setProcessDefaultNetwork(network);
+                            disconnectAndroidPAndBelow = new Runnable() {
+                                @Override
+                                public void run() {
+                                    manager.bindProcessToNetwork(null);
+                                    manager.unregisterNetworkCallback(self);
+                                }
+                            };
                         }
-                        manager.unregisterNetworkCallback(this);
-                        final boolean result = success;
-                        final Handler handler = new Handler(Looper.getMainLooper());
-                        handler.post(new Runnable() {
-                            @Override
-                            public void run () {
-                                poResult.success(result);
-                            }
-                        });
                     }
                 });
-
-            } else {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    success = manager.bindProcessToNetwork(null);
-                } else {
-                    success = ConnectivityManager.setProcessDefaultNetwork(null);
-                }
             }
-
-        }
-        if (shouldReply) {
-            poResult.success(success);
         }
     }
 
@@ -638,6 +625,7 @@ public class WifiIotPlugin implements MethodCallHandler, EventChannel.StreamHand
             }
         } else {
             moWiFi.disconnect();
+            disconnectAndroidPAndBelow.run();
         }
         poResult.success(null);
     }
